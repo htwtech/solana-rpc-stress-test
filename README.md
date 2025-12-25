@@ -142,7 +142,7 @@ cargo build --release
 
 ```toml
 # Общие настройки (опционально, можно переопределить через аргументы командной строки)
-url = "http://104.204.140.68:8899"
+url = "https://api.mainnet-beta.solana.com"
 timeout_ms = 10
 duration = 300
 http_timeout = 60
@@ -215,7 +215,7 @@ workers = 10
 
 **Конфиг для тяжелых методов:**
 ```toml
-url = "http://104.204.140.68:8899"
+url = "https://api.mainnet-beta.solana.com"
 timeout_ms = 10
 duration = 300
 http_timeout = 60
@@ -241,7 +241,7 @@ workers = 50
 
 **Конфиг с кастомным методом getLatestBlock:**
 ```toml
-url = "http://104.204.140.68:8899"
+url = "https://api.mainnet-beta.solana.com"
 timeout_ms = 10
 duration = 300
 http_timeout = 60
@@ -351,7 +351,7 @@ workers = 100
 
 ```bash
 ./target/release/solana-rpc-stress-test \
-  --url http://104.204.140.68:8899 \
+  --url https://api.mainnet-beta.solana.com \
   --workers 100 \
   --method getSlot \
   --timeout-ms 5 \
@@ -377,7 +377,7 @@ workers = 100
 SIGNATURE="5izHHnE3JQe6qZP23EhiR9DNm6ddCjP54Yhd3k58Y3cMiMNT5RQFZwLreMGsA6548rGUHwzNo2oUsYyS4v6yKbqr"
 
 # 2. Получите транзакцию в base64
-curl -X POST http://104.204.140.68:8899 \
+curl -X POST https://api.mainnet-beta.solana.com \
   -H "Content-Type: application/json" \
   -d "{
     \"jsonrpc\": \"2.0\",
