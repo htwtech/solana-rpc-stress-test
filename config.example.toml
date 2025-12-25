@@ -1,0 +1,31 @@
+url = "https://api.mainnet-beta.solana.com"
+# Request delay ms
+timeout_ms = 30
+# Test Duration sec
+duration = 60
+# HTTP session timeout sec
+http_timeout = 30
+
+# RPC Method , params, workers count
+[[methods]]
+method = "getRecentPrioritizationFees"
+params = []
+workers = 10
+
+
+# Double check block actual block number
+#[[methods]]
+#method = "getBlock"
+#params = [388997334, { commitment = "finalized", encoding = "json", transactionDetails = "full", maxSupportedTransactionVersion = 0, rewards = false }]
+#workers = 10
+
+# Synthetic method (getSlot + getBlock)
+[[methods]]
+method = "getLatestBlock"
+params = [ { commitment = "finalized", encoding = "json", transactionDetails = "full", maxSupportedTransactionVersion = 0, rewards = false }]
+workers = 10
+
+[[methods]]
+method = "simulateTransaction"
+params = ["AexGySTobarM81MSDjGqPWmLOTmUILJe63xV652hTkDVprgstc/J0sJPQj9eUmni1nCAKPZhgyJUu2WYSg6h+AmAAQAEDGQZPgRMpwv/rCDYd26qaB5VeRcblaT4L69BX/reRfvDCgUkQaFYTleMcAX2p74eBXQZd1dwDyQZAPJfSv2KGc5fhkxp8pIzBK5iqmN41NYLWy9LoGNoODfQgwz+9ZGnzHhSHLF5zruFibVWotXslNJJhoL9+bsq9a1k5JHMQVPauYWuPLoIHj1rtPdLNX3+MqAowL1C3mfnKmBZ/gHZOU3i+HfoPa7GiI9Dq7WuezEbt4w0lgiX/OWnuCwW4g/xl+wzLzzOv1RDutSRJ3yD5zNhIDZ1D8mAZfIoTa1vIR+Y8Yfsh9H3Rcs6AzhKJqae2gyi0aoPQeQkFjd+kf9bXTEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMGRm/lIRcy/+ytunLDm+e8jOW7xfcSayxDmzpAAAAABHnVW/IxwG7udMVuzmgVB/2xst6j9I5RArHNola8E48K8cNDIYjKOmNRNaE6GJUazr0p5qwu7Tj5Hm3Rsjs8V1AqCsfV6blYjo3oywkKqcTrUhDSQhrBc2dzRKxd4oJHBAkACQMRJwAAAAAAAAgCAAcMAgAAAAEAAAAAAAAACh0TBQACBAEGFhAKChUKDwUMFBcNDgEEEBYTExESCyXBIJszQdacgQABAAAAXwFkAAEWKGvuAAAAAE0yK5EHAAAAAAAACAIAAwwCAAAAQA0DAAAAAAAB1ZuEWF9vDQJ8xEjOJ4CEuZ0VjhuJ+uREzISFmwaXO1oDMzY3CTIIBQYCNAsJNQ==",{sigVerify = true,encoding = "base64"}]
+workers = 10
