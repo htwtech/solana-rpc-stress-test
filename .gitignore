@@ -1,0 +1,6 @@
+/target
+benchmark_results.json
+
+# Игнорировать все config*.json файлы (кроме config.example.json)
+config*.json
+!config.example.json
