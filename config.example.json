@@ -3,6 +3,9 @@
   "timeout_ms": 1,
   "duration": 60,
   "http_timeout": 30,
+  "headers": {
+    "Authorization": "Bearer YOUR_API_KEY_HERE"
+  },
   "methods": [
     {
       "method": "getHealth",

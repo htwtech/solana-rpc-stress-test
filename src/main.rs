@@ -17,6 +17,8 @@ use solana_sdk::{
     system_instruction,
     hash::Hash,
 };
+use std::collections::HashMap;
+use std::io::Write;
 use std::str::FromStr;
 
 // Максимальное количество времен ответов для перцентилей (sampling)
@@ -68,6 +70,9 @@ struct Config {
     timeout_ms: Option<u64>,
     duration: Option<u64>,
     http_timeout: Option<u64>,
+    /// Custom HTTP headers (e.g., Authorization, X-API-Key)
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
     methods: Vec<MethodConfig>,
 }
 
@@ -356,13 +361,20 @@ impl Stats {
 // Оптимизация: используем статические строки где возможно
 const JSONRPC_VERSION: &str = "2.0";
 
+enum RpcError {
+    /// HTTP ошибка (не 2xx) — например 401, 403, 429, 500
+    HttpStatus { status_code: u16, reason: String, body: String },
+    /// Сетевая/парсинг ошибка от reqwest
+    Reqwest(reqwest::Error),
+}
+
 async fn send_rpc_request(
     client: &reqwest::Client,
     url: &str,
     method: &str,
     params: Vec<serde_json::Value>,
     request_id: u64,
-) -> Result<JsonRpcResponse, reqwest::Error> {
+) -> Result<JsonRpcResponse, RpcError> {
     let request = JsonRpcRequest {
         jsonrpc: JSONRPC_VERSION.to_string(),
         id: request_id,
@@ -374,9 +386,19 @@ async fn send_rpc_request(
         .post(url)
         .json(&request)
         .send()
-        .await?;
+        .await
+        .map_err(RpcError::Reqwest)?;
 
-    response.json::<JsonRpcResponse>().await
+    // Проверяем HTTP статус до парсинга JSON
+    let status = response.status();
+    if !status.is_success() {
+        let status_code = status.as_u16();
+        let reason = status.canonical_reason().unwrap_or("Unknown").to_string();
+        let body = response.text().await.unwrap_or_default();
+        return Err(RpcError::HttpStatus { status_code, reason, body });
+    }
+
+    response.json::<JsonRpcResponse>().await.map_err(RpcError::Reqwest)
 }
 
 async fn get_latest_slot(
@@ -392,7 +414,7 @@ async fn get_latest_slot(
                 }
             }
         }
-        Err(_) => {}
+        Err(RpcError::HttpStatus { .. }) | Err(RpcError::Reqwest(_)) => {}
     }
     None
 }
@@ -444,7 +466,12 @@ async fn get_latest_blockhash(
                 }
             }
         }
-        Err(e) => {
+        Err(RpcError::HttpStatus { status_code, reason, body, .. }) => {
+            if debug {
+                eprintln!("getLatestBlockhash HTTP error: {} {} - {}", status_code, reason, body);
+            }
+        }
+        Err(RpcError::Reqwest(e)) => {
             if debug {
                 eprintln!("getLatestBlockhash request failed: {}", e);
             }
@@ -531,16 +558,33 @@ async fn worker(
     private_key: Option<serde_json::Value>,
     skip_preflight: bool,
     should_stop: Arc<AtomicBool>,
+    headers: Option<HashMap<String, String>>,
 ) {
     // Оптимизация HTTP клиента: keep-alive, connection pooling, TCP_NODELAY
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .timeout(http_timeout)
         .tcp_keepalive(Duration::from_secs(60))
         .tcp_nodelay(true) // Отключаем Nagle algorithm для низкой латентности
         .pool_max_idle_per_host(20) // Увеличиваем pool для лучшей производительности
-        .pool_idle_timeout(Duration::from_secs(90))
-        .build()
-        .expect("Failed to create HTTP client");
+        .pool_idle_timeout(Duration::from_secs(90));
+
+    // Применяем кастомные HTTP заголовки (API ключи и т.д.)
+    if let Some(ref hdrs) = headers {
+        let mut header_map = reqwest::header::HeaderMap::new();
+        for (key, value) in hdrs {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                header_map.insert(name, val);
+            } else if debug {
+                eprintln!("[Worker {}] Invalid header: {}: {}", worker_id, key, value);
+            }
+        }
+        builder = builder.default_headers(header_map);
+    }
+
+    let client = builder.build().expect("Failed to create HTTP client");
 
     // Оптимизация: кешируем MethodStats для этого воркера, чтобы избежать повторных lookup
     // Для обычных методов используем кеш, для getLatestBlock - нет (разные stats_method)
@@ -609,6 +653,8 @@ async fn worker(
     } else {
         None
     };
+
+    let mut is_warmup = true; // Первый запрос — прогрев (TCP handshake, TLS), исключаем из статистики
 
     while (start_time.elapsed() < duration || duration.as_secs() == 0) && !should_stop.load(Ordering::Relaxed) {
         request_id += 1;
@@ -759,16 +805,24 @@ async fn worker(
                 }
                 
                 if json_response.error.is_none() {
-                    if debug && actual_method != "sendTransaction" {
-                        // Упрощенный вывод без pretty printing для производительности
-                        println!("[Worker {}] Success - Method: {}, Latency: {:.2}ms", 
-                            worker_id, actual_method, response_time_micros as f64 / 1000.0);
-                    }
-                    // Оптимизация: используем кешированный method_stats для обычных методов
-                    if stats_method == base_method {
-                        base_method_stats.record_success(response_time_micros);
+                    if is_warmup {
+                        if debug {
+                            println!("[Worker {}] Warmup - Method: {}, Latency: {:.2}ms (excluded from stats)",
+                                worker_id, actual_method, response_time_micros as f64 / 1000.0);
+                        }
+                        is_warmup = false;
                     } else {
-                        stats.record_success(&stats_method, response_time_micros);
+                        if debug && actual_method != "sendTransaction" {
+                            // Упрощенный вывод без pretty printing для производительности
+                            println!("[Worker {}] Success - Method: {}, Latency: {:.2}ms",
+                                worker_id, actual_method, response_time_micros as f64 / 1000.0);
+                        }
+                        // Оптимизация: используем кешированный method_stats для обычных методов
+                        if stats_method == base_method {
+                            base_method_stats.record_success(response_time_micros);
+                        } else {
+                            stats.record_success(&stats_method, response_time_micros);
+                        }
                     }
                 } else {
                     if debug && actual_method != "sendTransaction" {
@@ -785,8 +839,17 @@ async fn worker(
                     }
                 }
             }
-            Err(e) => {
-                // Проверяем, является ли это ошибкой парсинга JSON
+            Err(RpcError::HttpStatus { status_code, reason, ref body }) => {
+                if debug {
+                    println!("[Worker {}] HTTP Error: {} {} - {}", worker_id, status_code, reason, body);
+                }
+                if stats_method == base_method {
+                    base_method_stats.record_http_error(status_code, &reason);
+                } else {
+                    stats.record_http_error(&stats_method, status_code, &reason);
+                }
+            }
+            Err(RpcError::Reqwest(e)) => {
                 if e.is_decode() {
                     if debug {
                         println!("[Worker {}] JSON Parse Error: {}", worker_id, e);
@@ -795,29 +858,6 @@ async fn worker(
                         base_method_stats.record_json_parse_error();
                     } else {
                         stats.record_json_parse_error(&stats_method);
-                    }
-                } else if e.is_status() {
-                    // HTTP ошибка
-                    if let Some(status) = e.status() {
-                        let status_code = status.as_u16();
-                        let reason = status.canonical_reason().unwrap_or("Unknown");
-                        if debug {
-                            println!("[Worker {}] HTTP Error: {} {}", worker_id, status_code, reason);
-                        }
-                        if stats_method == base_method {
-                            base_method_stats.record_http_error(status_code, reason);
-                        } else {
-                            stats.record_http_error(&stats_method, status_code, reason);
-                        }
-                    } else {
-                        if debug {
-                            println!("[Worker {}] Request Error: {}", worker_id, e);
-                        }
-                        if stats_method == base_method {
-                            base_method_stats.record_network_error();
-                        } else {
-                            stats.record_network_error(&stats_method);
-                        }
                     }
                 } else if e.is_timeout() {
                     if debug {
@@ -985,6 +1025,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("HTTP timeout: {} sec", http_timeout_secs);
         println!("Duration: {} sec", duration_secs);
         println!("Debug mode: {}", if args.debug { "enabled" } else { "disabled" });
+        if let Some(ref hdrs) = config.headers {
+            println!("Custom headers:");
+            for (key, value) in hdrs {
+                // Маскируем значение для безопасности (показываем первые 4 символа)
+                let masked = if value.len() > 4 {
+                    format!("{}***", &value[..4])
+                } else {
+                    "***".to_string()
+                };
+                println!("  {}: {}", key, masked);
+            }
+        }
         println!("\nMethods from config:");
         for method_config in &config.methods {
             println!("  - {} (workers: {})", method_config.method, method_config.workers);
@@ -1009,6 +1061,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     method_config.private_key.clone(),
                     method_config.skip_preflight.unwrap_or(true), // По умолчанию true
                     should_stop.clone(),
+                    config.headers.clone(),
                 ));
                 handles.push(handle);
                 worker_id_counter += 1;
@@ -1049,6 +1102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None, // Нет приватного ключа в CLI режиме
                 true, // По умолчанию skip_preflight = true
                 should_stop.clone(),
+                None, // Нет кастомных заголовков в CLI режиме
             ));
             handles.push(handle);
         }
@@ -1063,10 +1117,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Анимация прогресса (только без debug, чтобы не мешать логам)
+    let spinner_should_stop = should_stop.clone();
+    let spinner_stats = stats.clone();
+    let is_debug = args.debug;
+    let spinner_handle = tokio::spawn(async move {
+        if is_debug {
+            return;
+        }
+        let spinner_chars = ['|', '/', '-', '\\'];
+        let mut idx = 0usize;
+        let start = Instant::now();
+        loop {
+            if spinner_should_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let elapsed = start.elapsed().as_secs();
+            let total_requests: u64 = spinner_stats.methods.iter()
+                .map(|s| s.value().total_requests.load(Ordering::Relaxed))
+                .sum();
+            let total_successful: u64 = spinner_stats.methods.iter()
+                .map(|s| s.value().successful_requests.load(Ordering::Relaxed))
+                .sum();
+            let rps = if elapsed > 0 { total_requests / elapsed } else { 0 };
+            print!("\r  {} Running... {:02}:{:02} | Requests: {} | OK: {} | RPS: ~{}   ",
+                spinner_chars[idx % 4], elapsed / 60, elapsed % 60,
+                total_requests, total_successful, rps);
+            let _ = std::io::stdout().flush();
+            idx += 1;
+            sleep(Duration::from_millis(250)).await;
+        }
+        // Очищаем строку спиннера
+        print!("\r{}\r", " ".repeat(80));
+        let _ = std::io::stdout().flush();
+    });
+
     // Ждем завершения всех воркеров
     for handle in handles {
         let _ = handle.await;
     }
+
+    // Останавливаем спиннер
+    should_stop.store(true, Ordering::Relaxed);
+    let _ = spinner_handle.await;
 
     // Выводим статистику
     println!("\n=== Final Statistics ===");
